@@ -132,8 +132,15 @@ def insert_secret(conn, secret_name, folder_name, username, url, encrypted_passw
 def add_secret(args):
     conn = connect_to_db()
     if isinstance(conn, mariadb.Connection):
+        # Prompt for the password twice using getpass
+        password = getpass.getpass("Enter your new password: ")
+        confirm_password = getpass.getpass("Confirm your new password: ")
+
+        if password != confirm_password:
+            return "Passwords do not match. Please try again."
+
         key = generate_128bit_hash(getpass.getpass("Enter master password: "))
-        encrypted_password = encrypt_password(args.password, key)
+        encrypted_password = encrypt_password(password, key)
         
         # If URL is not provided, set it to an empty string
         url = args.url if args.url else ""
@@ -171,6 +178,46 @@ def encrypt_password(password: str, key: bytes) -> str:
     encrypted_password = iv + ciphertext  # Add IV to the beginning of the encrypted string
     encrypted_password_base64 = base64.b64encode(encrypted_password).decode('utf-8')
     return encrypted_password_base64
+
+def search_folders(conn, query=None):
+    cursor = conn.cursor()
+    if query:
+        # If a query is passed, search for the folder matching the query
+        cursor.execute("SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id WHERE f.name LIKE %s ORDER BY f.name, s.name", (f"%{query}%",))
+    else:
+        # If no query is passed, display all folders and their secrets
+        cursor.execute("SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id ORDER BY f.name, s.name")
+
+    folders = {}
+    for folder_name, secret_name in cursor.fetchall():
+        if folder_name not in folders:
+            folders[folder_name] = []
+        if secret_name:
+            folders[folder_name].append(secret_name)
+
+    return folders
+
+
+def search(args):
+    conn = connect_to_db()
+    if isinstance(conn, mariadb.Connection):
+        folders = search_folders(conn, args.query)
+        conn.close()
+        
+        if not folders:
+            return "No matching folders or secrets found."
+        
+        output = []
+        for folder, secrets in folders.items():
+            output.append(f"{folder}/")  # Display folder name with a slash for folder-like appearance
+            for secret in secrets:
+                output.append(f"  └── {secret}")  # Use '└──' to resemble folder structure
+
+        return "\n".join(output)
+    else:
+        return conn
+
+
 
 def add(args):
     conn = connect_to_db()
@@ -211,7 +258,6 @@ add_parser.add_argument('name', type=str, help="The name of the folder or secret
 add_parser.add_argument('-f', '--folder', type=str, required=True,help="The name of the folder where the secret will be stored (required for secret)")
 add_parser.add_argument('-u', '--username', type=str, required=True, help="The username associated with the secret (required for secret)")
 add_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional for secret)")
-add_parser.add_argument('-p', '--password', type=str, required=True, help="The password to store (required for secret)")
 
 # Add parser for remove command
 remove_parser = subparsers.add_parser('remove', help="Remove a folder or secret")
@@ -225,6 +271,12 @@ review_parser.add_argument('secret_name', type=str, help="The name of the secret
 review_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored")
 review_parser.add_argument('-c', '--copy', action='store_true', help="Copy the password to the clipboard")
 
+# Add parser for search command
+search_parser = subparsers.add_parser('search', help="Search for folders and their secrets")
+search_parser.add_argument('query', nargs='?', type=str, help="The folder name to search for (optional)")
+
+
+
 args = parser.parse_args()
 
 # Execute based on command
@@ -237,5 +289,8 @@ elif args.command == "remove":
 elif args.command == "review":
     result = review_secret(args)
     print(result)
+elif args.command == "search":
+    result = search(args)
+    print(result)
 else:
-    print("Invalid command. Use 'add', 'remove', or 'review'.")
+    print("Invalid command. Use 'add', 'remove', 'review', or 'search'.")
