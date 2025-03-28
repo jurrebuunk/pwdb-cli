@@ -8,6 +8,7 @@ import base64
 import os
 from cryptography.hazmat.primitives import padding
 import getpass
+import pyperclip
 
 def connect_to_db():
     config = configparser.ConfigParser()
@@ -67,12 +68,18 @@ def fetch_secret_password(conn, secret_name, folder_name):
 
 def review_secret(args):
     conn = connect_to_db()
-    if conn:
+    if isinstance(conn, mariadb.Connection):
         result = fetch_secret_password(conn, args.secret_name, args.folder_name)
         conn.close()
-        return result
+        
+        if args.copy:  # If the '--copy' flag is provided
+            pyperclip.copy(result)  # Copy the result to clipboard
+            return "Password copied to clipboard"
+        else:
+            return result
     else:
-        return "Database connection failed."
+        return conn
+
 
 def encrypt_password(password: str, key: bytes) -> str:
     iv = os.urandom(16)  # Gebruik een willekeurig IV per encryptie
@@ -125,6 +132,7 @@ subparsers = parser.add_subparsers(dest="command")
 review_parser = subparsers.add_parser('review', help="Review a secret password")
 review_parser.add_argument('-s', '--secret-name', type=str, required=True, help="The name of the secret to retrieve")
 review_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored")
+review_parser.add_argument('-c', '--copy', action='store_true', help="Copy the password to the clipboard")
 
 create_parser = subparsers.add_parser('create', help="Create a new secret")
 create_parser.add_argument('-s', '--secret-name', type=str, required=True, help="The name of the secret to create")
@@ -132,6 +140,7 @@ create_parser.add_argument('-f', '--folder-name', type=str, required=True, help=
 create_parser.add_argument('-u', '--username', type=str, required=True, help="The username associated with the secret")
 create_parser.add_argument('-l', '--url', type=str, required=False, help="The URL associated with the secret")
 create_parser.add_argument('-p', '--password', type=str, required=True, help="The password to store")
+
 
 args = parser.parse_args()
 
