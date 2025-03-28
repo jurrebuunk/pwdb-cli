@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import padding
 import getpass
 import pyperclip
 
+
 def connect_to_db():
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -32,6 +33,43 @@ def connect_to_db():
         print(f"Error connecting to database: {e}")
         return None
 
+def create_folder(conn, folder_name):
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
+    folder = cursor.fetchone()
+    if folder:
+        return f"Folder '{folder_name}' already exists."
+    
+    cursor.execute("INSERT INTO folders (name) VALUES (%s)", (folder_name,))
+    conn.commit()
+    return f"Folder '{folder_name}' successfully created."
+
+def remove_folder(conn, folder_name):
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
+    folder = cursor.fetchone()
+    if not folder:
+        return f"Folder '{folder_name}' does not exist."
+    
+    cursor.execute("DELETE FROM folders WHERE name = %s", (folder_name,))
+    conn.commit()
+    return f"Folder '{folder_name}' successfully removed."
+
+def decrypt_password(encrypted_password: str, key: bytes) -> str:
+    encrypted_password_bytes = base64.b64decode(encrypted_password)
+    iv = encrypted_password_bytes[:16]  # Extract IV from the first 16 bytes
+    ciphertext = encrypted_password_bytes[16:]  # Extract the ciphertext
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    decrypted_password_bytes = decryptor.update(ciphertext) + decryptor.finalize()
+
+    # Unpad the data
+    unpadder = padding.PKCS7(128).unpadder()
+    decrypted_password = unpadder.update(decrypted_password_bytes) + unpadder.finalize()
+
+    return decrypted_password.decode('utf-8')
+
 def generate_128bit_hash(master_password: str) -> bytes:
     md5_hash = hashlib.md5()
     md5_hash.update(master_password.encode('utf-8'))
@@ -39,19 +77,18 @@ def generate_128bit_hash(master_password: str) -> bytes:
 
 def decrypt_password(encrypted_password: str, key: bytes) -> str:
     encrypted_password_bytes = base64.b64decode(encrypted_password)
-    iv = encrypted_password_bytes[:16]  # Pak de IV uit de eerste 16 bytes
-    ciphertext = encrypted_password_bytes[16:]  # Pak de ciphertext
+    iv = encrypted_password_bytes[:16]  # Extract IV from the first 16 bytes
+    ciphertext = encrypted_password_bytes[16:]  # Extract the ciphertext
 
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     decrypted_password_bytes = decryptor.update(ciphertext) + decryptor.finalize()
 
-    # Unpad de data
+    # Unpad the data
     unpadder = padding.PKCS7(128).unpadder()
     decrypted_password = unpadder.update(decrypted_password_bytes) + unpadder.finalize()
 
     return decrypted_password.decode('utf-8')
-
 
 def fetch_secret_password(conn, secret_name, folder_name):
     cursor = conn.cursor()
@@ -80,22 +117,6 @@ def review_secret(args):
     else:
         return conn
 
-
-def encrypt_password(password: str, key: bytes) -> str:
-    iv = os.urandom(16)  # Gebruik een willekeurig IV per encryptie
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-
-    padder = padding.PKCS7(128).padder()
-    padded_password = padder.update(password.encode('utf-8')) + padder.finalize()
-
-    ciphertext = encryptor.update(padded_password) + encryptor.finalize()
-
-    encrypted_password = iv + ciphertext  # Voeg IV toe aan begin van de versleutelde string
-    encrypted_password_base64 = base64.b64encode(encrypted_password).decode('utf-8')
-    return encrypted_password_base64
-
-
 def insert_secret(conn, secret_name, folder_name, username, url, encrypted_password):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
@@ -108,7 +129,7 @@ def insert_secret(conn, secret_name, folder_name, username, url, encrypted_passw
     conn.commit()
     return f"Secret '{secret_name}' successfully inserted."
 
-def create_secret(args):
+def add_secret(args):
     conn = connect_to_db()
     if isinstance(conn, mariadb.Connection):
         key = generate_128bit_hash(getpass.getpass("Enter master password: "))
@@ -116,39 +137,105 @@ def create_secret(args):
         
         # If URL is not provided, set it to an empty string
         url = args.url if args.url else ""
-        print(f"Creating secret '{args.secret_name}'")
+        print(f"Adding secret '{args.name}'")
         # Insert the secret into the table
-        result = insert_secret(conn, args.secret_name, args.folder_name, args.username, url, encrypted_password)
+        result = insert_secret(conn, args.name, args.folder, args.username, url, encrypted_password)
+        conn.close()
+        return result
+    else:
+        return conn
+    
+def remove_secret(conn, secret_name, folder_name):
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
+    folder = cursor.fetchone()
+    if not folder:
+        return f"Folder '{folder_name}' does not exist."
+    
+    folder_id = folder[0]
+    cursor.execute("DELETE FROM secrets WHERE name = %s AND folder_id = %s", (secret_name, folder_id))
+    conn.commit()
+    return f"Secret '{secret_name}' successfully removed from folder '{folder_name}'."
+
+
+def encrypt_password(password: str, key: bytes) -> str:
+    iv = os.urandom(16)  # Use a random IV for each encryption
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+
+    padder = padding.PKCS7(128).padder()
+    padded_password = padder.update(password.encode('utf-8')) + padder.finalize()
+
+    ciphertext = encryptor.update(padded_password) + encryptor.finalize()
+
+    encrypted_password = iv + ciphertext  # Add IV to the beginning of the encrypted string
+    encrypted_password_base64 = base64.b64encode(encrypted_password).decode('utf-8')
+    return encrypted_password_base64
+
+def add(args):
+    conn = connect_to_db()
+    if isinstance(conn, mariadb.Connection):
+        if args.type == "folder":
+            result = create_folder(conn, args.name)
+        elif args.type == "secret":
+            result = add_secret(args)
+        else:
+            result = "Invalid type. Use 'folder' or 'secret'."
         conn.close()
         return result
     else:
         return conn
 
+def remove(args):
+    conn = connect_to_db()
+    if isinstance(conn, mariadb.Connection):
+        if args.type == "folder":
+            result = remove_folder(conn, args.name)
+        elif args.type == "secret":
+            result = remove_secret(conn, args.name, args.folder_name)
+        else:
+            result = "Invalid type. Use 'folder' or 'secret'."
+        conn.close()
+        return result
+    else:
+        return conn
 
-
+# Argument parser
 parser = argparse.ArgumentParser(description="Manage secrets stored in a MariaDB database.")
 subparsers = parser.add_subparsers(dest="command")
 
+# Add parser for add command
+add_parser = subparsers.add_parser('add', help="Add a folder or secret")
+add_parser.add_argument('type', choices=['folder', 'secret'], help="The type of item to add (folder or secret)")
+add_parser.add_argument('name', type=str, help="The name of the folder or secret to add")
+add_parser.add_argument('-f', '--folder', type=str, required=True,help="The name of the folder where the secret will be stored (required for secret)")
+add_parser.add_argument('-u', '--username', type=str, required=True, help="The username associated with the secret (required for secret)")
+add_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional for secret)")
+add_parser.add_argument('-p', '--password', type=str, required=True, help="The password to store (required for secret)")
+
+# Add parser for remove command
+remove_parser = subparsers.add_parser('remove', help="Remove a folder or secret")
+remove_parser.add_argument('type', choices=['folder', 'secret'], help="The type of item to remove (folder or secret)")
+remove_parser.add_argument('name', type=str, help="The name of the folder or secret to remove")
+remove_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored (required for secret)")
+
+# Review parser
 review_parser = subparsers.add_parser('review', help="Review a secret password")
-review_parser.add_argument('-s', '--secret-name', type=str, required=True, help="The name of the secret to retrieve")
+review_parser.add_argument('secret_name', type=str, help="The name of the secret to retrieve")
 review_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored")
 review_parser.add_argument('-c', '--copy', action='store_true', help="Copy the password to the clipboard")
 
-create_parser = subparsers.add_parser('create', help="Create a new secret")
-create_parser.add_argument('-s', '--secret-name', type=str, required=True, help="The name of the secret to create")
-create_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret will be stored")
-create_parser.add_argument('-u', '--username', type=str, required=True, help="The username associated with the secret")
-create_parser.add_argument('-l', '--url', type=str, required=False, help="The URL associated with the secret")
-create_parser.add_argument('-p', '--password', type=str, required=True, help="The password to store")
-
-
 args = parser.parse_args()
 
-if args.command == "review":
+# Execute based on command
+if args.command == "add":
+    result = add(args)
+    print(result)
+elif args.command == "remove":
+    result = remove(args)
+    print(result)
+elif args.command == "review":
     result = review_secret(args)
     print(result)
-elif args.command == "create":
-    result = create_secret(args)
-    print(result)
 else:
-    print("Invalid command. Use 'review' or 'create'.")
+    print("Invalid command. Use 'add', 'remove', or 'review'.")
