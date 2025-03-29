@@ -34,6 +34,9 @@ def connect_to_db():
         return None
 
 def create_folder(conn, folder_name):
+    if not folder_name.startswith("/"):
+        folder_name = "/" + folder_name  # Zorg ervoor dat de folder altijd begint met "/"
+
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
     folder = cursor.fetchone()
@@ -43,6 +46,7 @@ def create_folder(conn, folder_name):
     cursor.execute("INSERT INTO folders (name) VALUES (%s)", (folder_name,))
     conn.commit()
     return f"Folder '{folder_name}' successfully created."
+
 
 def remove_folder(conn, folder_name):
     cursor = conn.cursor()
@@ -179,6 +183,7 @@ def encrypt_password(password: str, key: bytes) -> str:
     encrypted_password_base64 = base64.b64encode(encrypted_password).decode('utf-8')
     return encrypted_password_base64
 
+
 def search_folders(conn, query=None):
     cursor = conn.cursor()
     if query:
@@ -255,8 +260,8 @@ subparsers = parser.add_subparsers(dest="command")
 add_parser = subparsers.add_parser('add', help="Add a folder or secret")
 add_parser.add_argument('type', choices=['folder', 'secret'], help="The type of item to add (folder or secret)")
 add_parser.add_argument('name', type=str, help="The name of the folder or secret to add")
-add_parser.add_argument('-f', '--folder', type=str, required=True,help="The name of the folder where the secret will be stored (required for secret)")
-add_parser.add_argument('-u', '--username', type=str, required=True, help="The username associated with the secret (required for secret)")
+add_parser.add_argument('-f', '--folder', type=str,help="The name of the folder where the secret will be stored (required for secret)")
+add_parser.add_argument('-u', '--username', type=str, help="The username associated with the secret (required for secret)")
 add_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional for secret)")
 
 # Add parser for remove command
