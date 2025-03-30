@@ -136,21 +136,22 @@ def insert_secret(conn, secret_name, folder_name, username, url, encrypted_passw
 def add_secret(args):
     conn = connect_to_db()
     if isinstance(conn, mariadb.Connection):
-        # Prompt for the password twice using getpass
+        #prompt missing info
+        if not args.username:
+            args.username = input("Enter the username associated with the secret: ")
         password = getpass.getpass("Enter your new password: ")
         confirm_password = getpass.getpass("Confirm your new password: ")
-
         if password != confirm_password:
             return "Passwords do not match. Please try again."
-
-        key = generate_128bit_hash(getpass.getpass("Enter master password: "))
-        encrypted_password = encrypt_password(password, key)
-        
         # If URL is not provided, set it to an empty string
         url = args.url if args.url else ""
-        print(f"Adding secret '{args.name}'")
+        
+        key = generate_128bit_hash(getpass.getpass("Enter master password: "))
+        print(f"Adding secret '{args.secret_name}'")
+        encrypted_password = encrypt_password(password, key)
+        
         # Insert the secret into the table
-        result = insert_secret(conn, args.name, args.folder, args.username, url, encrypted_password)
+        result = insert_secret(conn, args.secret_name, args.folder, args.username, url, encrypted_password)
         conn.close()
         return result
     else:
@@ -187,41 +188,60 @@ def encrypt_password(password: str, key: bytes) -> str:
 def search_folders(conn, query=None):
     cursor = conn.cursor()
     if query:
-        # If a query is passed, search for the folder matching the query
-        cursor.execute("SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id WHERE f.name LIKE %s ORDER BY f.name, s.name", (f"%{query}%",))
+        cursor.execute(
+            "SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id WHERE f.name LIKE %s ORDER BY f.name, s.name",
+            (f"%{query}%",),
+        )
     else:
-        # If no query is passed, display all folders and their secrets
-        cursor.execute("SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id ORDER BY f.name, s.name")
+        cursor.execute(
+            "SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id ORDER BY f.name, s.name"
+        )
 
     folders = {}
     for folder_name, secret_name in cursor.fetchall():
-        if folder_name not in folders:
-            folders[folder_name] = []
-        if secret_name:
-            folders[folder_name].append(secret_name)
+        folders.setdefault(folder_name, []).append(secret_name) if secret_name else folders.setdefault(folder_name, [])
 
-    return folders
+    def build_tree():
+        tree = {}
+        for folder in sorted(folders.keys()):
+            parts = folder.strip("/").split("/")
+            current = tree
+            for part in parts:
+                current = current.setdefault(part, {})
+            if folders[folder]:
+                current["_secrets"] = folders[folder]
+        return tree
+
+    def print_tree(node, prefix="", is_last=True, has_sibling=False):
+        lines = []
+        keys = sorted(k for k in node.keys() if k != "_secrets")
+        total_keys = len(keys) + len(node.get("_secrets", []))
+
+        for i, key in enumerate(keys):
+            last = i == len(keys) - 1 and not node.get("_secrets", [])
+            lines.append(f"{prefix}{'└── ' if last and not has_sibling else '├── '}{key}/")
+            lines.extend(print_tree(node[key], prefix + ("    " if last and not has_sibling else "│   "), last, bool(node.get("_secrets"))))
+
+        if "_secrets" in node:
+            for i, secret in enumerate(node["_secrets"]):
+                last = i == len(node["_secrets"]) - 1
+                lines.append(f"{prefix}{'└── ' if last else '├── '}{secret}")
+
+        return lines
+
+    tree = build_tree()
+    return "\n".join(print_tree(tree, ""))
+
+
+
 
 
 def search(args):
     conn = connect_to_db()
-    if isinstance(conn, mariadb.Connection):
-        folders = search_folders(conn, args.query)
+    if conn:
+        result = search_folders(conn, args.query)
         conn.close()
-        
-        if not folders:
-            return "No matching folders or secrets found."
-        
-        output = []
-        for folder, secrets in folders.items():
-            output.append(f"{folder}/")  # Display folder name with a slash for folder-like appearance
-            for secret in secrets:
-                output.append(f"  └── {secret}")  # Use '└──' to resemble folder structure
-
-        return "\n".join(output)
-    else:
-        return conn
-
+        print(result)
 
 
 def add(args):
@@ -251,45 +271,57 @@ def remove(args):
         return result
     else:
         return conn
+    
 
 # Argument parser
 parser = argparse.ArgumentParser(description="Manage secrets stored in a MariaDB database.")
 subparsers = parser.add_subparsers(dest="command")
 
-# Add parser for add command
-add_parser = subparsers.add_parser('add', help="Add a folder or secret")
-add_parser.add_argument('type', choices=['folder', 'secret'], help="The type of item to add (folder or secret)")
-add_parser.add_argument('name', type=str, help="The name of the folder or secret to add")
-add_parser.add_argument('-f', '--folder', type=str,help="The name of the folder where the secret will be stored (required for secret)")
-add_parser.add_argument('-u', '--username', type=str, help="The username associated with the secret (required for secret)")
-add_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional for secret)")
+# Add parser for mkdir (folder creation)
+mkdir_parser = subparsers.add_parser('mkdir', help="Create a folder")
+mkdir_parser.add_argument('folder_name', type=str, help="The path of the folder to create")
 
-# Add parser for remove command
-remove_parser = subparsers.add_parser('remove', help="Remove a folder or secret")
-remove_parser.add_argument('type', choices=['folder', 'secret'], help="The type of item to remove (folder or secret)")
-remove_parser.add_argument('name', type=str, help="The name of the folder or secret to remove")
-remove_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored (required for secret)")
+# Add parser for secret (add secret)
+secret_parser = subparsers.add_parser('secret', help="Add a secret")
+secret_parser.add_argument('secret_name', type=str, help="The name of the secret")
+secret_parser.add_argument('-d', '--folder', type=str, required=True, help="The folder where the secret will be stored")
+secret_parser.add_argument('-u', '--username', type=str, help="The username associated with the secret")
+secret_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional)")
 
-# Review parser
+# Add parser for rmdir (remove folder)
+rmdir_parser = subparsers.add_parser('rmdir', help="Remove a folder")
+rmdir_parser.add_argument('folder_name', type=str, help="The path of the folder to remove")
+
+# Add parser for rmsecret (remove secret)
+rmsecret_parser = subparsers.add_parser('rmsecret', help="Remove a secret")
+rmsecret_parser.add_argument('secret_name', type=str, help="The name of the secret to remove")
+rmsecret_parser.add_argument('-d', '--folder', type=str, required=True, help="The folder where the secret is stored")
+
+# Review parser (review a secret password)
 review_parser = subparsers.add_parser('review', help="Review a secret password")
 review_parser.add_argument('secret_name', type=str, help="The name of the secret to retrieve")
-review_parser.add_argument('-f', '--folder-name', type=str, required=True, help="The name of the folder where the secret is stored")
+review_parser.add_argument('-d', '--folder', type=str, required=True, help="The folder where the secret is stored")
 review_parser.add_argument('-c', '--copy', action='store_true', help="Copy the password to the clipboard")
 
-# Add parser for search command
+# Search parser (search for folders and their secrets)
 search_parser = subparsers.add_parser('search', help="Search for folders and their secrets")
 search_parser.add_argument('query', nargs='?', type=str, help="The folder name to search for (optional)")
 
-
-
+# Parse arguments
 args = parser.parse_args()
 
 # Execute based on command
-if args.command == "add":
-    result = add(args)
+if args.command == "mkdir":
+    result = create_folder(conn, args.folder_name)
     print(result)
-elif args.command == "remove":
-    result = remove(args)
+elif args.command == "secret":
+    result = add_secret(args)
+    print(result)
+elif args.command == "rmdir":
+    result = remove_folder(conn, args.folder_name)
+    print(result)
+elif args.command == "rmsecret":
+    result = remove_secret(conn, args.secret_name, args.folder)
     print(result)
 elif args.command == "review":
     result = review_secret(args)
@@ -298,4 +330,4 @@ elif args.command == "search":
     result = search(args)
     print(result)
 else:
-    print("Invalid command. Use 'add', 'remove', 'review', or 'search'.")
+    print("Invalid command. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'search'.")
