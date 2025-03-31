@@ -12,8 +12,12 @@ import pyperclip
 
 
 def connect_to_db():
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # Bepaal script locatie
+    config_path = os.path.join(script_dir, 'config.ini')  # Volledig pad naar config.ini
+
     config = configparser.ConfigParser()
-    config.read('config.ini')
+    config.read(config_path)  # Lees config bestand
+    
     db_host = config['database']['host']
     db_port = int(config['database']['port'])
     db_user = config['database']['user']
@@ -32,6 +36,7 @@ def connect_to_db():
     except mariadb.Error as e:
         print(f"Error connecting to database: {e}")
         return None
+
 
 def create_folder(conn, folder_name):
     if not folder_name.startswith("/"):
@@ -91,7 +96,19 @@ def fetch_secret_password(conn, secret_name, folder_name):
     else:
         return f"No matching secret found for '{secret_name}' in folder '{folder_name}'"
 
-
+def review_secret(secret_name, folder_name, copy=False):
+    conn = connect_to_db()
+    if isinstance(conn, mariadb.Connection):
+        result = fetch_secret_password(conn, secret_name, folder_name)
+        conn.close()
+        
+        if copy:
+            pyperclip.copy(result)
+            return "Password copied to clipboard"
+        else:
+            return result
+    else:
+        return "Database connection failed."
 
 
 def insert_secret(conn, secret_name, folder_name, username, url, encrypted_password):
@@ -255,9 +272,11 @@ def parse_and_execute(command_str):
     elif command == "review":
         if len(args) >= 1:
             path = args[0]
+            folder_name, secret_name = os.path.split(path)
             copy = "-c" in args or "--copy" in args
-            result = review_secret(path, copy)
+            result = review_secret(secret_name, folder_name, copy)
             print(result)
+
 
     elif command == "ls":
         query = args[0] if args else None
@@ -269,9 +288,7 @@ def parse_and_execute(command_str):
     else:
         print("Invalid command. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'ls'.")
 
-# Example usage:
-# parse_and_execute("secret /AD/users/secret -u admin -l example.com")
-import argparse
+
 
 parser = argparse.ArgumentParser(description="Process command input as a single string.")
 parser.add_argument("command", nargs=argparse.REMAINDER, help="Full command input")
@@ -281,6 +298,5 @@ args = parser.parse_args()
 if args.command:
     command_str = " ".join(args.command)
     parse_and_execute(command_str)
-    print(f"Received command: {command_str}")
 else:
-    print("No command provided.")
+    print("No command provided. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'ls'.")
