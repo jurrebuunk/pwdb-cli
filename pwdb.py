@@ -91,20 +91,7 @@ def fetch_secret_password(conn, secret_name, folder_name):
     else:
         return f"No matching secret found for '{secret_name}' in folder '{folder_name}'"
 
-def review_secret(args):
-    conn = connect_to_db()
-    if isinstance(conn, mariadb.Connection):
-        folder_path, secret_name = os.path.split(args.path)
-        result = fetch_secret_password(conn, secret_name, folder_path)
-        conn.close()
-        
-        if args.copy:  # If the '--copy' flag is provided
-            pyperclip.copy(result)  # Copy the result to clipboard
-            return "Password copied to clipboard"
-        else:
-            return result
-    else:
-        return conn
+
 
 
 def insert_secret(conn, secret_name, folder_name, username, url, encrypted_password):
@@ -119,9 +106,9 @@ def insert_secret(conn, secret_name, folder_name, username, url, encrypted_passw
     conn.commit()
     return f"Secret '{secret_name}' successfully inserted."
 
-def add_secret(args):
+def add_secret(path, username=None, url=None):
     # Split the provided path into folder and secret name
-    folder_path, secret_name = os.path.split(args.path)
+    folder_path, secret_name = os.path.split(path)
     
     if not folder_path:
         return "Error: The folder path must be specified and cannot be empty."
@@ -139,8 +126,8 @@ def add_secret(args):
             return f"Error: Folder '{folder_path}' does not exist."
 
         # Prompt for username if not provided
-        if not args.username:
-            args.username = input("Enter the username associated with the secret: ")
+        if not username:
+            username = input("Enter the username associated with the secret: ")
 
         # Prompt for the password twice using getpass
         password = getpass.getpass("Enter your new password: ")
@@ -154,17 +141,15 @@ def add_secret(args):
         encrypted_password = encrypt_password(password, key)
 
         # If URL is not provided, set it to an empty string
-        url = args.url if args.url else ""
+        url = url if url else ""
         print(f"Adding secret '{secret_name}' in folder '{folder_path}'")
         
         # Insert the secret into the table
-        result = insert_secret(conn, secret_name, folder_path, args.username, url, encrypted_password)
+        result = insert_secret(conn, secret_name, folder_path, username, url, encrypted_password)
         conn.close()
         return result
     else:
-        conn.close()
-        return conn
-    
+        return "Error: Database connection failed."    
 def remove_folder(conn, folder_name):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
@@ -227,66 +212,75 @@ def search_folders(conn, query=None):
     return "\n".join(print_tree(build_tree()))
     
 
-# Argument parser
-parser = argparse.ArgumentParser(description="Manage secrets stored in a MariaDB database.")
-subparsers = parser.add_subparsers(dest="command")
+def parse_and_execute(command_str):
+    tokens = command_str.split()
+    if not tokens:
+        print("No command entered.")
+        return
 
-# Add parser for mkdir (folder creation)
-mkdir_parser = subparsers.add_parser('mkdir', help="Create a folder")
-mkdir_parser.add_argument('folder_name', type=str, help="The path of the folder to create")
+    command = tokens[0]
+    args = tokens[1:]
 
-# Add parser for secret (add secret) using a single path argument
-secret_parser = subparsers.add_parser('secret', help="Add a secret")
-secret_parser.add_argument('path', type=str, help="Full path for the secret (e.g., /AD/users/secret)")
-secret_parser.add_argument('-u', '--username', type=str, help="The username associated with the secret")
-secret_parser.add_argument('-l', '--url', type=str, help="The URL associated with the secret (optional)")
+    if command == "mkdir" and len(args) == 1:
+        conn = connect_to_db()
+        if conn:
+            print(create_folder(conn, args[0]))
+            conn.close()
 
-# Add parser for rmdir (remove folder)
-rmdir_parser = subparsers.add_parser('rmdir', help="Remove a folder")
-rmdir_parser.add_argument('folder_name', type=str, help="The path of the folder to remove")
+    elif command == "secret":
+        if len(args) >= 1:
+            path = args[0]
+            username = None
+            url = None
+            for i in range(1, len(args), 2):
+                if args[i] in ["-u", "--username"] and i + 1 < len(args):
+                    username = args[i + 1]
+                elif args[i] in ["-l", "--url"] and i + 1 < len(args):
+                    url = args[i + 1]
+            result = add_secret(path, username, url)
+            print(result)
 
-# Remove secret
-rmsecret_parser = subparsers.add_parser("rmsecret", help="Remove a secret")
-rmsecret_parser.add_argument("path", type=str)
+    elif command == "rmdir" and len(args) == 1:
+        conn = connect_to_db()
+        if conn:
+            print(remove_folder(conn, args[0]))
+            conn.close()
 
-# Review parser (review a secret password)
-review_parser = subparsers.add_parser('review', help="Review a secret password")
-review_parser.add_argument('path', type=str, help="Full path for the secret (e.g., /AD/users/rinze)")
-review_parser.add_argument('-c', '--copy', action='store_true', help="Copy the password to the clipboard")
+    elif command == "rmsecret" and len(args) == 1:
+        conn = connect_to_db()
+        if conn:
+            print(remove_secret(conn, os.path.basename(args[0]), os.path.dirname(args[0])))
+            conn.close()
 
-# Search folders/secrets
-ls_parser = subparsers.add_parser("ls", help="List folders and secrets")
-ls_parser.add_argument("query", nargs="?", type=str, help="Search query (optional)")
+    elif command == "review":
+        if len(args) >= 1:
+            path = args[0]
+            copy = "-c" in args or "--copy" in args
+            result = review_secret(path, copy)
+            print(result)
 
-# Parse arguments
+    elif command == "ls":
+        query = args[0] if args else None
+        conn = connect_to_db()
+        if conn:
+            print(search_folders(conn, query))
+            conn.close()
+
+    else:
+        print("Invalid command. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'ls'.")
+
+# Example usage:
+# parse_and_execute("secret /AD/users/secret -u admin -l example.com")
+import argparse
+
+parser = argparse.ArgumentParser(description="Process command input as a single string.")
+parser.add_argument("command", nargs=argparse.REMAINDER, help="Full command input")
+
 args = parser.parse_args()
 
-# Execute based on command
-if args.command == "mkdir":
-    conn = connect_to_db()
-    if conn:
-        print(create_folder(conn, args.folder_name))
-        conn.close()
-elif args.command == "secret":
-    result = add_secret(args)
-    print(result)
-elif args.command == "rmdir":
-    conn = connect_to_db()
-    if conn:
-        print(remove_folder(conn, args.folder_name))
-        conn.close()
-elif args.command == "rmsecret":
-    conn = connect_to_db()
-    if conn:
-        print(remove_secret(conn, os.path.basename(args.path), os.path.dirname(args.path)))
-        conn.close()
-elif args.command == "review":
-    result = review_secret(args)
-    print(result)
-elif args.command == "ls":
-    conn = connect_to_db()
-    if conn:
-        print(search_folders(conn, args.query))
-        conn.close()
+if args.command:
+    command_str = " ".join(args.command)
+    parse_and_execute(command_str)
+    print(f"Received command: {command_str}")
 else:
-    print("Invalid command. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'search'.")
+    print("No command provided.")
