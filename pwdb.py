@@ -1,4 +1,4 @@
-import mariadb
+import MySQLdb
 import configparser
 import argparse
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -10,13 +10,12 @@ from cryptography.hazmat.primitives import padding
 import getpass
 import pyperclip
 
-
 def connect_to_db():
-    script_dir = os.path.dirname(os.path.abspath(__file__))  # Bepaal script locatie
-    config_path = os.path.join(script_dir, 'config.ini')  # Volledig pad naar config.ini
-
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'config.ini')
+    
     config = configparser.ConfigParser()
-    config.read(config_path)  # Lees config bestand
+    config.read(config_path)
     
     db_host = config['database']['host']
     db_port = int(config['database']['port'])
@@ -25,32 +24,41 @@ def connect_to_db():
     db_name = config['database']['database']
     
     try:
-        conn = mariadb.connect(
+        conn = MySQLdb.connect(
             host=db_host,
             port=db_port,
             user=db_user,
-            password=db_password,
-            database=db_name
+            passwd=db_password,
+            db=db_name
         )
         return conn
-    except mariadb.Error as e:
+    except MySQLdb.Error as e:
         print(f"Error connecting to database: {e}")
         return None
 
-
 def create_folder(conn, folder_name):
     if not folder_name.startswith("/"):
-        folder_name = "/" + folder_name  # Zorg ervoor dat de folder altijd begint met "/"
+        folder_name = "/" + folder_name
 
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
-    folder = cursor.fetchone()
-    if folder:
-        return f"Folder '{folder_name}' already exists."
-    
-    cursor.execute("INSERT INTO folders (name) VALUES (%s)", (folder_name,))
-    conn.commit()
-    return f"Folder '{folder_name}' successfully created."
+
+    # Split the folder path into all possible parent folders
+    parts = folder_name.strip("/").split("/")
+    current_path = ""
+
+    for part in parts:
+        current_path += f"/{part}"  # Build the path step by step
+        
+        # Check if the folder already exists
+        cursor.execute("SELECT id FROM folders WHERE name = %s", (current_path,))
+        folder = cursor.fetchone()
+
+        if not folder:  # Only insert if it does not exist
+            cursor.execute("INSERT INTO folders (name) VALUES (%s)", (current_path,))
+            conn.commit()
+
+    return f"Folder '{folder_name}' successfully created with all necessary parent folders."
+
 
 def remove_secret(conn, secret_name, folder_name):
     cursor = conn.cursor()
@@ -70,14 +78,13 @@ def generate_128bit_hash(master_password: str) -> bytes:
 
 def decrypt_password(encrypted_password: str, key: bytes) -> str:
     encrypted_password_bytes = base64.b64decode(encrypted_password)
-    iv = encrypted_password_bytes[:16]  # Extract IV from the first 16 bytes
-    ciphertext = encrypted_password_bytes[16:]  # Extract the ciphertext
+    iv = encrypted_password_bytes[:16]  
+    ciphertext = encrypted_password_bytes[16:]  
 
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     decrypted_password_bytes = decryptor.update(ciphertext) + decryptor.finalize()
 
-    # Unpad the data
     unpadder = padding.PKCS7(128).unpadder()
     decrypted_password = unpadder.update(decrypted_password_bytes) + unpadder.finalize()
 
@@ -96,10 +103,11 @@ def fetch_secret_password(conn, secret_name, folder_name):
     else:
         return f"No matching secret found for '{secret_name}' in folder '{folder_name}'"
 
-def review_secret(secret_name, folder_name, copy=False):
+def review_secret(path, copy):
+    folder, secret = path.rsplit("/", 1)
     conn = connect_to_db()
-    if isinstance(conn, mariadb.Connection):
-        result = fetch_secret_password(conn, secret_name, folder_name)
+    if conn:
+        result = fetch_secret_password(conn, secret, folder)
         conn.close()
         
         if copy:
@@ -108,8 +116,7 @@ def review_secret(secret_name, folder_name, copy=False):
         else:
             return result
     else:
-        return "Database connection failed."
-
+        return "Error: Database connection failed."
 
 def insert_secret(conn, secret_name, folder_name, username, url, encrypted_password):
     cursor = conn.cursor()
@@ -123,18 +130,21 @@ def insert_secret(conn, secret_name, folder_name, username, url, encrypted_passw
     conn.commit()
     return f"Secret '{secret_name}' successfully inserted."
 
-def add_secret(path, username=None, url=None):
-    # Split the provided path into folder and secret name
-    folder_path, secret_name = os.path.split(path)
-    
+import os
+
+def add_secret(path, url=None):
+    folder_path, secret_name = os.path.split(path)  # This splits the path into folder and secret
+
     if not folder_path:
         return "Error: The folder path must be specified and cannot be empty."
     
+    # If the path ends with a slash, we remove it
+    if folder_path.endswith('/'):
+        folder_path = folder_path[:-1]
+
     conn = connect_to_db()
-    if isinstance(conn, mariadb.Connection):
+    if conn:
         cursor = conn.cursor()
-        
-        # Check if the folder exists
         cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_path,))
         folder = cursor.fetchone()
         
@@ -142,11 +152,8 @@ def add_secret(path, username=None, url=None):
             conn.close()
             return f"Error: Folder '{folder_path}' does not exist."
 
-        # Prompt for username if not provided
-        if not username:
-            username = input("Enter the username associated with the secret: ")
+        username = secret_name  # Now we use the secret_name directly from the path
 
-        # Prompt for the password twice using getpass
         password = getpass.getpass("Enter your new password: ")
         confirm_password = getpass.getpass("Confirm your new password: ")
 
@@ -157,16 +164,15 @@ def add_secret(path, username=None, url=None):
         key = generate_128bit_hash(getpass.getpass("Enter master password: "))
         encrypted_password = encrypt_password(password, key)
 
-        # If URL is not provided, set it to an empty string
         url = url if url else ""
-        print(f"Adding secret '{secret_name}' in folder '{folder_path}'")
         
-        # Insert the secret into the table
         result = insert_secret(conn, secret_name, folder_path, username, url, encrypted_password)
         conn.close()
         return result
     else:
-        return "Error: Database connection failed."    
+        return "Error: Database connection failed."
+
+
 def remove_folder(conn, folder_name):
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM folders WHERE name = %s", (folder_name,))
@@ -178,9 +184,8 @@ def remove_folder(conn, folder_name):
     conn.commit()
     return f"Folder '{folder_name}' successfully removed."
 
-
 def encrypt_password(password: str, key: bytes) -> str:
-    iv = os.urandom(16)  # Use a random IV for each encryption
+    iv = os.urandom(16)  
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
 
@@ -189,45 +194,41 @@ def encrypt_password(password: str, key: bytes) -> str:
 
     ciphertext = encryptor.update(padded_password) + encryptor.finalize()
 
-    encrypted_password = iv + ciphertext  # Add IV to the beginning of the encrypted string
+    encrypted_password = iv + ciphertext  
     encrypted_password_base64 = base64.b64encode(encrypted_password).decode('utf-8')
     return encrypted_password_base64
 
-
-def search_folders(conn, query=None):
+def list_folder_contents(conn, folder_path="/"):
     cursor = conn.cursor()
-    query = f"%{query}%" if query else "%"
-    cursor.execute("SELECT f.name, s.name FROM folders f LEFT JOIN secrets s ON f.id = s.folder_id WHERE f.name LIKE %s ORDER BY f.name, s.name",
-                   (query,))
-    
-    folders = {}
-    for folder_name, secret_name in cursor.fetchall():
-        folders.setdefault(folder_name, []).append(secret_name) if secret_name else folders.setdefault(folder_name, [])
 
-    def build_tree():
-        tree = {}
-        for folder in sorted(folders.keys()):
-            parts = folder.strip("/").split("/")
-            current = tree
-            for part in parts:
-                current = current.setdefault(part, {})
-            if folders[folder]:
-                current["_secrets"] = folders[folder]
-        return tree
+    # Ensure the path starts with "/"
+    if not folder_path.startswith("/"):
+        folder_path = "/" + folder_path
 
-    def print_tree(node, prefix=""):
-        lines = []
-        keys = sorted(k for k in node.keys() if k != "_secrets")
-        for key in keys:
-            lines.append(f"{prefix}├── {key}/")
-            lines.extend(print_tree(node[key], prefix + "│   "))
-        if "_secrets" in node:
-            for secret in node["_secrets"]:
-                lines.append(f"{prefix}└── {secret}")
-        return lines
+    # If the path is "/", list all unique first-level folders
+    if folder_path == "/":
+        cursor.execute("SELECT name FROM folders WHERE name LIKE '/%'")
+        subfolders = {row[0].split('/')[1] for row in cursor.fetchall()}
+    else:
+        # Fetch only first-level subfolders under the given path
+        cursor.execute("SELECT name FROM folders WHERE name LIKE %s", (folder_path + "/%",))
+        subfolders = {row[0][len(folder_path):].strip("/").split('/')[0] for row in cursor.fetchall()}
 
-    return "\n".join(print_tree(build_tree()))
-    
+    # Fetch secrets inside the given folder
+    cursor.execute("""
+        SELECT s.name 
+        FROM secrets s 
+        JOIN folders f ON s.folder_id = f.id 
+        WHERE f.name = %s
+    """, (folder_path,))
+    secrets = ["." + row[0] for row in cursor.fetchall()]
+
+    # Format folders (only show the last part, no full path)
+    formatted_folders = sorted(f"{name}/" for name in subfolders if name)
+
+    # Combine and return results
+    result = formatted_folders + sorted(secrets)
+    return "\n".join(result) if result else f"No contents found in '{folder_path}'"
 
 def parse_and_execute(command_str):
     tokens = command_str.split()
@@ -246,15 +247,7 @@ def parse_and_execute(command_str):
 
     elif command == "secret":
         if len(args) >= 1:
-            path = args[0]
-            username = None
-            url = None
-            for i in range(1, len(args), 2):
-                if args[i] in ["-u", "--username"] and i + 1 < len(args):
-                    username = args[i + 1]
-                elif args[i] in ["-l", "--url"] and i + 1 < len(args):
-                    url = args[i + 1]
-            result = add_secret(path, username, url)
+            result = add_secret(args[0])
             print(result)
 
     elif command == "rmdir" and len(args) == 1:
@@ -271,24 +264,19 @@ def parse_and_execute(command_str):
 
     elif command == "review":
         if len(args) >= 1:
-            path = args[0]
-            folder_name, secret_name = os.path.split(path)
-            copy = "-c" in args or "--copy" in args
-            result = review_secret(secret_name, folder_name, copy)
+            result = review_secret(args[0], "-c" in args or "--copy" in args)
             print(result)
-
-
     elif command == "ls":
-        query = args[0] if args else None
-        conn = connect_to_db()
-        if conn:
-            print(search_folders(conn, query))
-            conn.close()
+        if len(args) == 1:
+            conn = connect_to_db()
+            if conn:
+                print(list_folder_contents(conn, args[0]))
+                conn.close()
+        else:
+            print("Usage: ls <folder_path>")
 
     else:
-        print("Invalid command. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'ls'.")
-
-
+        print("Invalid command. Use 'mkdir', 'secret', etc.")
 
 parser = argparse.ArgumentParser(description="Process command input as a single string.")
 parser.add_argument("command", nargs=argparse.REMAINDER, help="Full command input")
@@ -296,7 +284,6 @@ parser.add_argument("command", nargs=argparse.REMAINDER, help="Full command inpu
 args = parser.parse_args()
 
 if args.command:
-    command_str = " ".join(args.command)
-    parse_and_execute(command_str)
+    parse_and_execute(" ".join(args.command))
 else:
-    print("No command provided. Use 'mkdir', 'secret', 'rmdir', 'rmsecret', 'review', or 'ls'.")
+    print("No command provided.")
